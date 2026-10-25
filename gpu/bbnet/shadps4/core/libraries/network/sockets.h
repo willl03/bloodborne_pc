@@ -246,5 +246,15 @@ void P2PRelaySetServer(u32 addr_nbo);
 void P2PRelaySetLocalId(std::string_view online_id);
 void P2PRelaySetSelfEndpoint(u32 addr_nbo, u16 port_nbo); // our public endpoint (STUN echo)
 void P2PRelayRememberPeer(std::string_view online_id, u32 addr_nbo, u16 port_nbo);
+// The relay is addressed by online id: a peer with no endpoint at all (no port forward, no UPnP,
+// no STUN echo) stays reachable at this made-up endpoint of its id - the same in every client,
+// 169.254.x.y:3658, never sent to directly.
+u32 P2PRelaySyntheticAddr(std::string_view online_id);
+u16 P2PRelaySyntheticPort();
+bool P2PRelaySynthetic(u32 addr_nbo);
+bool P2PRelayEnabled();
+// The endpoint to address a peer nobody published at, and the relay told about it; false when
+// the relay is off (then callers keep their old "no endpoint" behaviour).
+bool P2PRelaySyntheticFor(std::string_view online_id, u32* addr_nbo, u16* port_nbo);
 
 } // namespace Libraries::Net

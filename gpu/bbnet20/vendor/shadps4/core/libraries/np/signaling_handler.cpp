@@ -79,12 +79,29 @@ bool ResolvePeerEndpointUnremembered(const NpMatching2::MemberCache& member, u32
            *out_port != 0;
 }
 
-// BBSC relay fallback: the transport learns which online id sits behind each endpoint.
+// BBSC relay fallback: the relay is addressed by online id, so a peer whose endpoint nobody
+// published (no port forward, no UPnP, no STUN echo) is still reachable through it at the
+// synthetic endpoint of its id. Fills addr/port and tells the relay; false when the relay is off
+// (then behavior is exactly the old one).
+bool RelaySyntheticEndpoint(std::string_view online_id, u32* addr, u16* port) {
+    if (online_id.empty() || !Core::Net::P2P::Relay::Instance().Enabled()) {
+        return false;
+    }
+    *addr = Core::Net::P2P::SyntheticPeerAddr(online_id);
+    *port = Core::Net::P2P::SyntheticPeerPort();
+    Core::Net::P2P::Relay::Instance().RememberPeer(online_id, *addr, *port);
+    return true;
+}
+
+// The transport learns which online id sits behind each endpoint.
 bool ResolvePeerEndpoint(const NpMatching2::MemberCache& member, u32* out_addr, u16* out_port) {
-    const bool resolved = ResolvePeerEndpointUnremembered(member, out_addr, out_port);
-    if (resolved) {
-        Core::Net::P2P::Relay::Instance().RememberPeer(OnlineIdString(member.np_id.handle),
-                                                       *out_addr, *out_port);
+    const std::string online_id = OnlineIdString(member.np_id.handle);
+    bool resolved = ResolvePeerEndpointUnremembered(member, out_addr, out_port);
+    if (!resolved) {
+        resolved = RelaySyntheticEndpoint(online_id, out_addr, out_port);
+    }
+    if (resolved && !online_id.empty()) {
+        Core::Net::P2P::Relay::Instance().RememberPeer(online_id, *out_addr, *out_port);
     }
     return resolved;
 }
@@ -843,9 +860,12 @@ void ProcessPendingActivations() {
 
         u32 peer_addr = 0;
         u16 peer_port = 0;
-        const bool resolved =
+        bool resolved =
             NpSignaling::Transport::ResolvePeer(act.peer_online_id, &peer_addr, &peer_port) &&
             peer_addr != 0 && peer_port != 0;
+        if (!resolved) {
+            resolved = RelaySyntheticEndpoint(act.peer_online_id, &peer_addr, &peer_port);
+        }
 
         if (!resolved) {
             LOG_DEBUG(Lib_NpSignaling,

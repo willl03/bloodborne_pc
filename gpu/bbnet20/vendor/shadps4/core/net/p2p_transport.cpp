@@ -296,7 +296,7 @@ Error Transport::SendPacket(std::span<const u8> packet, const Endpoint& to) {
                                                                  const Endpoint& e) {
         (void)Host::SendTo(socket_, p.data(), p.size(), 0, e.Sockaddr(), e.Length());
     });
-    if (path == Relay::Path::Relay) {
+    if (path == Relay::Path::Relay || path == Relay::Path::Dropped) {
         return Error::Ok;
     }
     const auto r =

@@ -15,8 +15,17 @@
 // answered through it at once.
 // Every known peer goes through the relay from the first frame (direct copies still go out until
 // the peer answers, and a peer without the relay is answered directly).
+//
+// The relay is addressed by online id, so it does not need the peer's public endpoint. Without a
+// port forward and without UPnP (and with no STUN echo from the server) signaling has no endpoint
+// at all; a peer like that is given a synthetic endpoint derived from its online id
+// (169.254.x.y:3658, the same in both clients, never routed) and is relayed only. Frames addressed
+// somewhere the relay does not know (0.0.0.0, a LAN address) go through the relay too when the
+// session has exactly one peer. A real endpoint learned later switches the peer back to direct.
+//
 // SHADPS4_P2P_RELAY=0 turns it off, =auto (or direct) = "direct first, relay after 2 s",
-// =a.b.c.d:port another relay; SHADPS4_P2P_RELAY_PORT changes the port.
+// =a.b.c.d:port another relay; SHADPS4_P2P_RELAY_PORT changes the port;
+// SHADPS4_P2P_RELAY_UNKNOWN=0 turns off the one-peer fallback for unknown destinations.
 #pragma once
 
 #include <chrono>
@@ -33,6 +42,13 @@
 
 namespace Core::Net::P2P {
 
+/// The endpoint a peer without a reachable one is addressed at (network order): 169.254.<h>.<h>
+/// from its online id, port 3658. The same id gives the same endpoint in every client, so the
+/// address a relayed frame carries is the one the other side's game expects.
+u32 SyntheticPeerAddr(std::string_view online_id);
+u16 SyntheticPeerPort();
+bool IsSyntheticPeerAddr(u32 addr_nbo);
+
 class Relay {
 public:
     static Relay& Instance();
@@ -44,14 +60,15 @@ public:
     void SetSelfEndpoint(u32 addr_nbo, u16 port_nbo);
     /// An online id of ours (registered with the relay).
     void SetLocalId(std::string_view online_id);
-    /// A peer and the endpoint signaling uses for it.
+    /// A peer and the endpoint signaling uses for it; 0,0 = none known (relay by id).
     void RememberPeer(std::string_view online_id, u32 addr_nbo, u16 port_nbo);
 
     // ---- the transport ----------------------------------------------------------------------
     using SendRaw = std::function<void(std::span<const u8>, const Endpoint&)>;
     /// Direct = the caller sends directly only; Relay = sent through the relay, nothing else to
-    /// do; Both = through the relay and the caller sends it directly too.
-    enum class Path { Direct, Relay, Both };
+    /// do; Both = through the relay and the caller sends it directly too; Dropped = the peer is a
+    /// synthetic one the relay does not have, and there is nowhere else to send it.
+    enum class Path { Direct, Relay, Both, Dropped };
     Path Route(const Endpoint& dest, std::span<const u8> wire, const SendRaw& send);
     struct Received {
         bool consumed = false;  // a relay control packet: nothing to process
@@ -78,6 +95,7 @@ private:
         // The relay said it is not registered: direct only until then.
         std::chrono::steady_clock::time_point missing_until{};
         bool missing_logged{false};
+        bool synthetic{false}; // addr/port are the made-up 169.254.x.y:3658 of this id
         std::vector<std::vector<u8>> early; // sent directly before the switch (sent again then)
     };
 
@@ -88,6 +106,10 @@ private:
     Peer* FindPeerLocked(u32 addr_nbo, u16 port_nbo);
     Endpoint ServerEndpointLocked() const;
     void SendRelayedLocked(const Peer& peer, std::span<const u8> wire, const SendRaw& send);
+    /// A destination no peer is known at (0.0.0.0, a LAN address): through the relay when the
+    /// session has exactly one reachable peer. Returns false when it cannot.
+    bool RelayUnknownLocked(u32 dest_addr, u16 dest_port, std::span<const u8> wire,
+                            const SendRaw& send);
 
     std::mutex mutex_;
     u32 server_addr_{0};
@@ -100,7 +122,8 @@ private:
     std::vector<std::string> local_ids_;
     std::unordered_map<std::string, Peer> peers_;  // by padded online id
     std::unordered_map<u64, std::string> alias_;   // every known endpoint -> online id
-    u32 next_pseudo_{1};
+    bool unknown_fallback_{true}; // SHADPS4_P2P_RELAY_UNKNOWN=0 turns it off
+    bool unknown_logged_{false};
     u64 sent_{0};
     u64 received_{0};
     std::chrono::steady_clock::time_point last_status_{};

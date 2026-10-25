@@ -44,3 +44,11 @@ target_link_libraries(bbnet20 PRIVATE bbgpu nlohmann_json::nlohmann_json protobu
     OpenSSL::SSL OpenSSL::Crypto ZLIB::ZLIB "${MINIUPNPC_LIBRARY}" Vulkan::Headers fmt::fmt
     Boost::headers magic_enum::magic_enum)
 target_include_directories(bbnet20 PRIVATE "${MINIUPNPC_INCLUDE}")
+
+# The relay's synthetic endpoints and relay-by-id fallback (tests/test_p2p_relay.cpp): no sockets,
+# no server, no game. Build it explicitly: ninja -C out/gpu p2p-relay-test && out/gpu/p2p-relay-test
+add_executable(p2p-relay-test EXCLUDE_FROM_ALL ../../tests/test_p2p_relay.cpp
+    vendor/shadps4/core/net/p2p_relay.cpp ../common/logging/log.cpp)
+target_compile_options(p2p-relay-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+target_include_directories(p2p-relay-test PRIVATE include vendor/shadps4 ..)
+target_link_libraries(p2p-relay-test PRIVATE fmt::fmt)

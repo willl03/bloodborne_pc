@@ -976,8 +976,14 @@ void ProcessPendingActivations() {
 
         u32 peer_addr = 0;
         u16 peer_port = 0;
-        const bool resolved = Stubs::ResolvePeer(act.peer_online_id, &peer_addr, &peer_port) &&
-                              peer_addr != 0 && peer_port != 0;
+        bool resolved = Stubs::ResolvePeer(act.peer_online_id, &peer_addr, &peer_port) &&
+                        peer_addr != 0 && peer_port != 0;
+        // BBSC relay fallback: the relay is addressed by online id, so a peer whose endpoint the
+        // server never learned (no port forward, no UPnP) is still reachable at the synthetic
+        // endpoint of its id.
+        if (!resolved) {
+            resolved = Net::P2PRelaySyntheticFor(act.peer_online_id, &peer_addr, &peer_port);
+        }
 
         if (!resolved) {
             LOG_WARNING(Lib_NpSignaling, "peer '{}' endpoint unresolved; connection {} 30s timeout",

@@ -97,3 +97,31 @@ its hooks (`BB_ONLINE=1 BB_BBSC=1`, 2026-10-16).
 Seamless Hunt's own releases (BBSC 0.0.1) fixed items not showing, death and respawn, sign
 targeting and the relay framing inside `bbsc.dll` (a Windows mod for shadPS4/BBport); that source
 is not published, so those fixes are not here.
+
+## Relay by online id: co-op with no port forward and no UPnP (2026-10-25)
+
+The UDP relay is addressed by online id, but the client used to engage it only for a peer whose
+endpoint it already knew (`RememberPeer` dropped peers with a zero address, `Route` sent unknown
+destinations direct, and the signaling handshake was skipped outright for an endpoint-less peer).
+On a network with no port forward, no UPnP and no STUN echo from the server, nothing was ever
+relayed, which is why co-op only worked when somebody opened a port.
+
+Now, in both online modules (`gpu/bbnet20`, the 0.20 stack, and `gpu/bbnet`, the shadp2p
+fallback):
+
+- a peer with no endpoint is remembered by id and addressed at a **synthetic endpoint** derived
+  from the online id (`169.254.x.y:3658`, the same in every client, never sent to directly);
+  signaling and the game use it as the peer's address, and `Route` relays it only;
+- a frame addressed somewhere no peer is known (`0.0.0.0`, a LAN address, an endpoint signaling
+  mapped late) goes through the relay too, **when the session has exactly one peer**;
+- a frame from a peer the relay knows nothing about arrives from the synthetic endpoint of its id,
+  so both sides agree on it;
+- a real endpoint learned later still switches the peer back to direct (`direct_rx`), as before.
+
+What the game sees: the peer's address is `169.254.x.y:3658` when nobody published a real one.
+`SHADPS4_P2P_RELAY=0` keeps the old behaviour; `SHADPS4_P2P_RELAY_UNKNOWN=0` turns off only the
+one-peer fallback for unknown destinations. The relay server needs no change (Seamless Hunt's
+answers `BBR1` on UDP 3478 and forwards by id). Not covered: sessions with more than two players
+still need a real endpoint, because guessing which peer an unresolved frame belongs to would
+multiply every frame. `tests/test_p2p_relay.cpp` (`ninja -C out/gpu p2p-relay-test`) checks the
+synthetic endpoints, the fallback and the cases that must stay direct.

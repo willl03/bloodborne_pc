@@ -216,11 +216,18 @@ bool LookupStaticPeer(const std::string& npid, StaticPeer& out) {
 
 bool ResolvePeerEndpointUnremembered(const MemberCache& member, PeerInfo& peer);
 
-// BBSC relay fallback: the transport learns which online id sits behind each endpoint.
+// BBSC relay fallback: the transport learns which online id sits behind each endpoint. The relay
+// is addressed by online id, so a peer whose endpoint nobody published (no port forward and no
+// UPnP on its side, no STUN echo) is still reachable through it at the synthetic endpoint of its
+// id: signaling then sends there, the relay carries it, and both games address the peer alike.
 bool ResolvePeerEndpoint(const MemberCache& member, PeerInfo& peer) {
-    const bool resolved = ResolvePeerEndpointUnremembered(member, peer);
-    if (resolved) {
-        Net::P2PRelayRememberPeer(std::string(member.np_id.handle.data), peer.addr, peer.port);
+    const std::string online_id(member.np_id.handle.data);
+    bool resolved = ResolvePeerEndpointUnremembered(member, peer);
+    if (!resolved && Net::P2PRelaySyntheticFor(online_id, &peer.addr, &peer.port)) {
+        resolved = true;
+    }
+    if (resolved && !online_id.empty()) {
+        Net::P2PRelayRememberPeer(online_id, peer.addr, peer.port);
     }
     return resolved;
 }
@@ -244,7 +251,11 @@ bool ResolvePeerEndpointUnremembered(const MemberCache& member, PeerInfo& peer) 
         return true;
     }
 
-    if (peer.addr != 0 && peer.port != 0) {
+    // This peer's synthetic endpoint (relay by id) is not an answer: a real one published later
+    // still wins. A peer genuinely on a 169.254 LAN is not one, so the comparison is exact.
+    if (peer.addr != 0 && peer.port != 0 &&
+        !(peer.addr == Net::P2PRelaySyntheticAddr(online_id) &&
+          peer.port == Net::P2PRelaySyntheticPort())) {
         return true;
     }
     if (member.addr != 0 && member.port != 0) {

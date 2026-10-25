@@ -34,6 +34,29 @@ bool V4(const Endpoint& e, u32* addr_nbo, u16* port_nbo) {
 }
 } // namespace
 
+u32 SyntheticPeerAddr(std::string_view online_id) {
+    // FNV-1a over the online id: the same bytes give the same 169.254.x.y in every client. The
+    // id may arrive padded to 16 bytes (the relay's own tables) or as the plain name (the NP
+    // libraries), so the NUL padding is not part of the hash.
+    u32 h = 2166136261u;
+    for (const unsigned char c : online_id) {
+        if (c == 0) {
+            break;
+        }
+        h ^= c;
+        h *= 16777619u;
+    }
+    return htonl(0xA9FE0000u | (h & 0xFFFFu));
+}
+
+u16 SyntheticPeerPort() {
+    return htons(3658); // the PS4's P2P port, so the address looks like any peer's
+}
+
+bool IsSyntheticPeerAddr(u32 addr_nbo) {
+    return (ntohl(addr_nbo) & 0xFFFF0000u) == 0xA9FE0000u;
+}
+
 Relay& Relay::Instance() {
     static Relay relay;
     return relay;
@@ -71,6 +94,11 @@ void Relay::SetServer(u32 addr_nbo) {
     const char* env = std::getenv("SHADPS4_P2P_RELAY");
     const std::string mode = env != nullptr ? env : "";
     force_ = mode != "auto" && mode != "direct";
+    if (const char* unknown = std::getenv("SHADPS4_P2P_RELAY_UNKNOWN");
+        unknown != nullptr && *unknown != 0) {
+        const std::string off = unknown;
+        unknown_fallback_ = off != "0" && off != "off";
+    }
     u16 port = 3478;
     if (const char* p = std::getenv("SHADPS4_P2P_RELAY_PORT"); p != nullptr && *p != 0) {
         const long parsed = std::strtol(p, nullptr, 10);
@@ -129,7 +157,7 @@ void Relay::SetLocalId(std::string_view online_id) {
 }
 
 void Relay::RememberPeer(std::string_view online_id, u32 addr_nbo, u16 port_nbo) {
-    if (online_id.empty() || addr_nbo == 0 || port_nbo == 0) {
+    if (online_id.empty()) {
         return;
     }
     std::scoped_lock lock{mutex_};
@@ -139,9 +167,27 @@ void Relay::RememberPeer(std::string_view online_id, u32 addr_nbo, u16 port_nbo)
     // made signaling's sends find no relay entry: a one-way relay, DEAD after 30 s behind CGNAT).
     Peer& peer = peers_[id];
     peer.id = id;
-    peer.addr = addr_nbo; // the endpoint signaling uses: relayed frames arrive "from" it
-    peer.port = port_nbo;
-    AddAliasLocked(id, addr_nbo, port_nbo, "signaling");
+    // Signaling may hand this peer's own synthetic endpoint back to us: that is not a real one
+    // either. Compared exactly, so a peer genuinely on a 169.254 LAN keeps its address.
+    const bool synthetic = addr_nbo == 0 || port_nbo == 0 ||
+                           (addr_nbo == SyntheticPeerAddr(id) && port_nbo == SyntheticPeerPort());
+    if (!synthetic) {
+        peer.addr = addr_nbo; // the endpoint signaling uses: relayed frames arrive "from" it
+        peer.port = port_nbo;
+        peer.synthetic = false;
+        AddAliasLocked(id, addr_nbo, port_nbo, "signaling");
+    } else if (peer.addr == 0 || peer.port == 0) {
+        // No endpoint at all (no port forward, no UPnP, no STUN echo from the server): the relay
+        // is addressed by id, so the peer stays addressable at its synthetic endpoint.
+        peer.addr = SyntheticPeerAddr(id);
+        peer.port = SyntheticPeerPort();
+        peer.synthetic = true;
+        LOG_INFO(Lib_Net, "P2P relay fallback: '{}' has no reachable endpoint - relay only",
+                 IdText(id));
+    }
+    // The synthetic endpoint stays an alias even after a real one arrives: the game may keep
+    // addressing the peer there.
+    AddAliasLocked(id, SyntheticPeerAddr(id), SyntheticPeerPort(), "synthetic");
 }
 
 void Relay::AddAliasLocked(const std::string& id, u32 addr_nbo, u16 port_nbo, const char* from) {
@@ -210,6 +256,9 @@ void Relay::KeepAlive(const SendRaw& send) {
                      : now < peer.missing_until ? " not on the relay"
                      : peer.relay_seen          ? " relay"
                                                 : " relay (no answer yet)";
+            if (peer.synthetic) {
+                peers += " (no endpoint, relay by id)";
+            }
         }
         LOG_INFO(Lib_Net,
                  "P2P relay fallback: {} frame(s) sent / {} received through the relay so far; "
@@ -231,21 +280,35 @@ Relay::Path Relay::Route(const Endpoint& dest, std::span<const u8> wire, const S
         return Path::Direct;
     }
     std::scoped_lock lock{mutex_};
-    if (server_addr_ == 0 || local_ids_.empty() || dest_addr == server_addr_) {
+    Peer* const found = FindPeerLocked(dest_addr, dest_port);
+    // A peer we remembered without an endpoint only exists to go through the relay: never hand
+    // its 169.254 address to the OS, even when the relay has been turned off since.
+    const bool synthetic_dest = found != nullptr && found->synthetic;
+    if (server_addr_ == 0 || local_ids_.empty()) {
+        return synthetic_dest ? Path::Dropped : Path::Direct;
+    }
+    if (dest_addr == server_addr_) {
         return Path::Direct;
     }
-    Peer* const found = FindPeerLocked(dest_addr, dest_port);
     if (found == nullptr) {
-        return Path::Direct;
+        if (IsSyntheticPeerAddr(dest_addr)) {
+            return Path::Dropped; // a synthetic address of an id this session has no peer for
+        }
+        // 0.0.0.0, a LAN address, an endpoint signaling mapped after the fact: the relay knows
+        // the peer by id, so a one-peer session can still reach it.
+        return RelayUnknownLocked(dest_addr, dest_port, wire, send) ? Path::Relay : Path::Direct;
     }
     Peer& peer = *found;
     const auto now = std::chrono::steady_clock::now();
     if (peer.relayed && now < peer.missing_until) {
+        if (peer.synthetic) {
+            return Path::Dropped; // nowhere else to send it
+        }
         return Path::Direct;
     }
     if (!peer.relayed) {
-        if (force_) {
-            peer.relayed = true;
+        if (force_ || peer.synthetic) {
+            peer.relayed = true; // a synthetic endpoint has no direct path to wait for
         } else if (!peer.tx_started) {
             peer.tx_started = true;
             peer.first_tx = now;
@@ -265,7 +328,9 @@ Relay::Path Relay::Route(const Endpoint& dest, std::span<const u8> wire, const S
                  "P2P relay fallback: '{}' at {:#x}:{} {} - through the relay ({} earlier "
                  "frame(s) sent again)",
                  IdText(peer.id), peer.addr, ntohs(peer.port),
-                 force_ ? "(forced)" : "sent nothing back directly in 2 s", peer.early.size());
+                 peer.synthetic ? "(no endpoint)"
+                                : force_ ? "(forced)" : "sent nothing back directly in 2 s",
+                 peer.early.size());
         for (const std::vector<u8>& early : peer.early) {
             SendRelayedLocked(peer, early, send);
         }
@@ -273,12 +338,52 @@ Relay::Path Relay::Route(const Endpoint& dest, std::span<const u8> wire, const S
         peer.early.shrink_to_fit();
     }
     SendRelayedLocked(peer, wire, send);
+    if (peer.synthetic) {
+        return Path::Relay; // 169.254.x.y is never a real destination
+    }
     // After the switch, frames still go directly too until the peer answers either way: an
     // emulator without the relay can only be reached directly (and NAT holes can take longer
     // than 2 s to open). A peer that uses the relay gets direct copies for 10 s more.
     const bool direct_copy =
         !peer.direct_rx && (!peer.relay_seen || now - peer.relayed_since < std::chrono::seconds(10));
     return direct_copy ? Path::Both : Path::Relay;
+}
+
+bool Relay::RelayUnknownLocked(u32 dest_addr, u16 dest_port, std::span<const u8> wire,
+                               const SendRaw& send) {
+    if (!unknown_fallback_) {
+        return false;
+    }
+    const u32 host = ntohl(dest_addr);
+    if (host == 0xFFFFFFFFu || (host >> 28) == 0xE || (host >> 24) == 127) {
+        return false; // broadcast, multicast, loopback
+    }
+    if (dest_addr == server_addr_) {
+        return false; // never wrap relay traffic around itself
+    }
+    const auto now = std::chrono::steady_clock::now();
+    Peer* only = nullptr;
+    for (auto& [id, peer] : peers_) {
+        if (now < peer.missing_until) {
+            continue; // the relay does not have it either
+        }
+        if (only != nullptr) {
+            return false; // more than one peer: only the addressed one may get these
+        }
+        only = &peer;
+    }
+    if (only == nullptr) {
+        return false;
+    }
+    SendRelayedLocked(*only, wire, send);
+    if (!unknown_logged_) {
+        unknown_logged_ = true;
+        LOG_INFO(Lib_Net,
+                 "P2P relay fallback: nothing known at {:#x}:{} - sending through the relay as "
+                 "'{}'",
+                 dest_addr, ntohs(dest_port), IdText(only->id));
+    }
+    return true;
 }
 
 Relay::Received Relay::OnReceive(std::span<const u8> data, const Endpoint& from) {
@@ -337,9 +442,13 @@ Relay::Received Relay::OnReceive(std::span<const u8> data, const Endpoint& from)
                 peer.missing_logged = true;
                 LOG_WARNING(Lib_Net,
                             "P2P relay fallback: '{}' is not on the relay (it has no relay, or it "
-                            "is not running) - direct only; if direct does not work either, it "
-                            "cannot connect until it updates",
-                            IdText(peer.id));
+                            "is not running) - {}",
+                            IdText(peer.id),
+                            peer.synthetic
+                                ? "it has no endpoint either, so it cannot connect until it "
+                                  "updates"
+                                : "direct only; if direct does not work either, it cannot connect "
+                                  "until it updates");
             }
         }
         return out;
@@ -353,16 +462,18 @@ Relay::Received Relay::OnReceive(std::span<const u8> data, const Endpoint& from)
     std::memcpy(&ep_addr, data.data() + 5 + kIdSize, 4);
     std::memcpy(&ep_port, data.data() + 5 + kIdSize + 4, 2);
     if (!peers_.contains(id)) {
-        // A peer signaling never looked up: the endpoint it gave, else a made-up one
-        // (169.254.x.x, never sent to directly) so the answers go back through the relay.
+        // A peer signaling never looked up: the endpoint it gave, else its synthetic one
+        // (169.254.x.y, never sent to directly) so the answers go back through the relay. The
+        // synthetic endpoint is a function of the id, so both clients use the same one.
         Peer& made = peers_[id];
         made.id = id;
         if (ep_addr != 0 && ep_port != 0) {
             made.addr = ep_addr;
             made.port = ep_port;
         } else {
-            made.addr = htonl(0xA9FE0000u | (next_pseudo_++ & 0xFFFFu));
-            made.port = htons(3173);
+            made.addr = SyntheticPeerAddr(id);
+            made.port = SyntheticPeerPort();
+            made.synthetic = true;
         }
         AddAliasLocked(id, made.addr, made.port, "relay, new peer");
     }
