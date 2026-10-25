@@ -147,4 +147,5 @@ Now both modules parse `0x23`-`0x27` into their existing handlers
 `gpu/bbnet/.../np/np_signaling/np_signaling_helpers.cpp` (shadp2p). A packet of a type this build
 does not know in `0x23`-`0x2F` is logged once at `debug` with its first bytes instead of warning
 per packet. After the fix the log shows `BBSC life: player … says it is dead/alive` while playing,
-and the guest follows the host after a wipe instead of staying down.
+and the guest should follow the host after a wipe instead of staying down (the outcome this change
+targets; still to be confirmed in a real boss wipe).
