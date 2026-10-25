@@ -125,3 +125,26 @@ answers `BBR1` on UDP 3478 and forwards by id). Not covered: sessions with more 
 still need a real endpoint, because guessing which peer an unresolved frame belongs to would
 multiply every frame. `tests/test_p2p_relay.cpp` (`ninja -C out/gpu p2p-relay-test`) checks the
 synthetic endpoints, the fallback and the cases that must stay direct.
+
+## The BBSC packets past 0x22 are dispatched (2026-10-25)
+
+The game code has sent `0x23` (life state: dead/alive, twice a second), `0x24` (the host's
+scaling) and `0x25` (Duel Bell / PvP) since the 2026-10 work, and understands `0x26` (shared
+progress flags) and `0x27` (the host's boss), which a newer client such as BBSC's DLL sends. The
+signaling receive loop only routed `0x20` (follow) and `0x22` (world flags), so every other BBSC
+packet was dropped with `ReceiveThread: unexpected SHAD packet type=…`, once per packet, for the
+whole session.
+
+Consequence: a guest never received its host's dead/alive reports. When both died in a boss fight
+the host reloaded and came back, but the guest's wipe detection (`BbscAllPartnersReportDead`,
+`bbsc_peer_revivals`) never fired, `LivingPartnerExists()` fell back to the host's character copy
+(which `TickBbscRemoteRevive` keeps standing up), and `TickBbscSpectate` waited for a boss kill
+that the host's reload had already reset - until the 15-minute safety. The same drop silently
+disabled the host's scaling, PvP and shared-progress messages from a newer peer.
+
+Now both modules parse `0x23`-`0x27` into their existing handlers
+(`core/bloodborne_re.{h,cpp}`): `gpu/bbnet20/.../np/signaling_handler.cpp` (0.20 stack) and
+`gpu/bbnet/.../np/np_signaling/np_signaling_helpers.cpp` (shadp2p). A packet of a type this build
+does not know in `0x23`-`0x2F` is logged once at `debug` with its first bytes instead of warning
+per packet. After the fix the log shows `BBSC life: player … says it is dead/alive` while playing,
+and the guest follows the host after a wipe instead of staying down.

@@ -1,8 +1,13 @@
 // SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
+#include <array>
 #include <chrono>
+#include <cstdint>
 #include <cstring>
+#include <mutex>
+#include <string>
 #include <vector>
 
 #include "common/alignment.h"
@@ -385,6 +390,73 @@ static void ReceiveThreadMain() {
         if (nbytes == sizeof(SignalingBbscWorldFlags) &&
             type == static_cast<u8>(SignalingPacketType::BbscWorldFlags)) {
             Core::Bloodborne::OnBbscWorldFlagsPacket(buf, static_cast<u32>(nbytes));
+            continue;
+        }
+        // The rest of BBSC's packets. The game code has sent 0x23-0x25 and understood 0x26/0x27
+        // since the 2026-10 work on deaths, scaling, PvP and shared progress, but nothing
+        // dispatched them here: every one was dropped as "unexpected SHAD packet type". A guest
+        // therefore never heard that its host had died or come back, and stayed dead in a boss
+        // fight until the 15-minute safety net. Layouts are the senders' / handlers' own (see
+        // bloodborne_re.h).
+        if (type == static_cast<u8>(SignalingPacketType::BbscLife)) {
+            if (nbytes == 14) {
+                u32 player = 0;
+                u32 sequence = 0;
+                std::memcpy(&player, buf + 5, 4);
+                std::memcpy(&sequence, buf + 10, 4);
+                Core::Bloodborne::OnBbscLifePacket(player, buf[9], sequence);
+                continue;
+            }
+        } else if (type == static_cast<u8>(SignalingPacketType::BbscScale)) {
+            if (nbytes == 15) {
+                std::uint16_t percent[5]{};
+                std::memcpy(percent, buf + 5, sizeof(percent));
+                Core::Bloodborne::OnBbscScalePacket(percent);
+                continue;
+            }
+        } else if (type == static_cast<u8>(SignalingPacketType::BbscPvp)) {
+            if (nbytes == 11) {
+                Core::Bloodborne::OnBbscPvpPacket(buf[5], buf[6]);
+                continue;
+            }
+        } else if (type == static_cast<u8>(SignalingPacketType::BbscProgress) && nbytes >= 6) {
+            const size_t count = buf[5];
+            if (count <= 64 && nbytes == 6 + count * 4) {
+                std::uint32_t flags[64]{};
+                std::memcpy(flags, buf + 6, count * 4);
+                Core::Bloodborne::OnBbscProgressPacket(flags, count);
+                continue;
+            }
+        } else if (type == static_cast<u8>(SignalingPacketType::BbscHostBoss)) {
+            if (nbytes == 9) {
+                std::int32_t boss = 0;
+                std::memcpy(&boss, buf + 5, 4);
+                Core::Bloodborne::OnBbscHostBossPacket(boss);
+                continue;
+            }
+        }
+        if (type >= 0x23 && type <= 0x2F) {
+            // A BBSC build newer than this one: expected traffic, not a protocol error. Log the
+            // first of each type (and its bytes) so a layout that does not match is visible in
+            // one run.
+            static std::array<bool, 256> seen{};
+            static std::mutex seen_mutex;
+            bool first = false;
+            {
+                std::scoped_lock lock{seen_mutex};
+                first = !seen[type];
+                seen[type] = true;
+            }
+            if (first) {
+                std::string bytes;
+                for (size_t i = 0; i < std::min<size_t>(nbytes, 32); ++i) {
+                    bytes += fmt::format("{:02x}", buf[i]);
+                }
+                LOG_DEBUG(Lib_NpSignaling,
+                          "BBSC packet type {:#x} size {} is not handled by this build; first "
+                          "bytes {}",
+                          type, nbytes, bytes);
+            }
             continue;
         }
         if (nbytes == sizeof(SignalingEchoPong) &&
