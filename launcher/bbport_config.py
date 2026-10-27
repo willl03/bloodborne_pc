@@ -243,6 +243,9 @@ DEFAULTS = {
     "online": False,
     "online_bbsc": True,
     "online_net_gen": "19",
+    # Diagnostics: which BBSC packets 0x23-0x27 the module dispatches (SHADPS4_BBSC_RX).
+    # "all" leaves the game env untouched, i.e. the normal build.
+    "bbsc_rx": "all",
     "online_community": online.COMMUNITY_SERVER,
     "online_server": online.SHADNET_SERVER,
     "online_webapi": online.WEBAPI_SERVER,
@@ -542,6 +545,9 @@ def game_environment(s):
         env["BB_COMMUNITY_SERVER"] = community
         if "BB_NET_GEN" not in env:
             env["BB_NET_GEN"] = str(s.get("online_net_gen") or "19")
+        bbsc_rx = str(s.get("bbsc_rx") or "all").strip()
+        if bbsc_rx and bbsc_rx != "all":
+            env["SHADPS4_BBSC_RX"] = bbsc_rx
         backend = "bbhost" if (pool == "huntersdream" or s.get("online_backend") in ("bbhost", "hosts", "thehuntersdream", "hd")) else "shadnet"
         env["BB_ONLINE_BACKEND"] = backend
         if pool == "seamless":

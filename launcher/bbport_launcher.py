@@ -1282,6 +1282,7 @@ class LauncherWindow(
         s["online"] = self.online_row.get_active()
         s["online_bbsc"] = self.bbsc_row.get_active() if hasattr(self, "bbsc_row") else s.get("online_bbsc", False)
         s["online_net_gen"] = combo_value(self.net_gen_row) if hasattr(self, "net_gen_row") else s.get("online_net_gen", "19")
+        s["bbsc_rx"] = combo_value(self.bbsc_rx_row) if hasattr(self, "bbsc_rx_row") else s.get("bbsc_rx", "all")
         s["online_community"] = self.community_row.get_text().strip()
         s["online_server"] = self.server_row.get_text().strip()
         s["online_webapi"] = self.webapi_row.get_text().strip()

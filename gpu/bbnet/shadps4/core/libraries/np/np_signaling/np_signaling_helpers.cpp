@@ -5,6 +5,7 @@
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <mutex>
 #include <string>
@@ -260,6 +261,75 @@ void ShutdownRuntime() {
 
 namespace Libraries::Np::NpSignaling {
 
+namespace {
+// Diagnostic A/B (2026-10-27): which of BBSC's packet types 0x23-0x27 this run dispatches, from
+// SHADPS4_BBSC_RX. Unset or "all": all five, the normal build. "none" or "0": none, so those
+// packets fall through to the "unexpected SHAD packet type" path exactly as before the dispatch
+// existed. Otherwise a comma list such as "24" or "0x23,0x25" keeps only the listed types.
+u32 BbscRxMask() {
+    static const u32 mask = [] {
+        const char* env = std::getenv("SHADPS4_BBSC_RX");
+        if (env == nullptr || *env == '\0' || std::string_view{env} == "all") {
+            return 0x1Fu;
+        }
+        if (std::string_view{env} == "none" || std::string_view{env} == "0") {
+            return 0u;
+        }
+        const std::string mode = env;
+        u32 out = 0;
+        for (size_t at = 0; at < mode.size();) {
+            const size_t comma = mode.find(',', at);
+            const std::string item(mode, at,
+                                   comma == std::string::npos ? std::string::npos : comma - at);
+            const unsigned long value = std::strtoul(item.c_str(), nullptr, 0);
+            if (value >= 0x23 && value <= 0x27) {
+                out |= 1u << (value - 0x23);
+            }
+            if (comma == std::string::npos) {
+                break;
+            }
+            at = comma + 1;
+        }
+        return out;
+    }();
+    return mask;
+}
+
+// A type this build does not know (0x28 and up) is always let through to the debug line below.
+bool BbscRxAllows(u8 type) {
+    return type < 0x23 || type > 0x27 || (BbscRxMask() & (1u << (type - 0x23))) != 0;
+}
+
+void LogBbscRxMaskOnce() {
+    static const bool once = [] {
+        LOG_INFO(Lib_NpSignaling, "BBSC rx: dispatch mask {:#x} (SHADPS4_BBSC_RX)", BbscRxMask());
+        return true;
+    }();
+    (void)once;
+}
+
+// One line per (type, size) seen: a newer client's layout shows up without a packet dump.
+bool FirstSeenBbscPacket(u8 type, size_t size) {
+    struct SeenPacket {
+        u8 type;
+        size_t size;
+    };
+    static std::mutex mutex;
+    static std::array<SeenPacket, 16> seen{};
+    static size_t count = 0;
+    std::scoped_lock lock{mutex};
+    for (size_t i = 0; i < count; ++i) {
+        if (seen[i].type == type && seen[i].size == size) {
+            return false;
+        }
+    }
+    if (count < seen.size()) {
+        seen[count++] = {type, size};
+    }
+    return true;
+}
+} // namespace
+
 using Libraries::Net::sceNetNtohs;
 
 static Kernel::PthreadT g_dispatch_thread{};
@@ -392,13 +462,22 @@ static void ReceiveThreadMain() {
             Core::Bloodborne::OnBbscWorldFlagsPacket(buf, static_cast<u32>(nbytes));
             continue;
         }
+        LogBbscRxMaskOnce();
+        if (type >= 0x23 && type <= 0x2F && FirstSeenBbscPacket(type, nbytes)) {
+            LOG_INFO(Lib_NpSignaling, "BBSC rx: type {:#x} size {} (first seen)", type, nbytes);
+        }
         // The rest of BBSC's packets. The game code has sent 0x23-0x25 and understood 0x26/0x27
         // since the 2026-10 work on deaths, scaling, PvP and shared progress, but nothing
         // dispatched them here: every one was dropped as "unexpected SHAD packet type". A guest
         // therefore never heard that its host had died or come back, and stayed dead in a boss
         // fight until the 15-minute safety net. Layouts are the senders' / handlers' own (see
         // bloodborne_re.h).
-        if (type == static_cast<u8>(SignalingPacketType::BbscLife)) {
+        // A type masked out of SHADPS4_BBSC_RX is skipped here on purpose (A/B test): it reaches
+        // the "unexpected SHAD packet type" warning below, exactly as before the dispatch existed.
+        const bool bbsc_rx_allowed = BbscRxAllows(type);
+        if (!bbsc_rx_allowed) {
+            // falls through to the warning below
+        } else if (type == static_cast<u8>(SignalingPacketType::BbscLife)) {
             if (nbytes == 14) {
                 u32 player = 0;
                 u32 sequence = 0;
@@ -435,7 +514,7 @@ static void ReceiveThreadMain() {
                 continue;
             }
         }
-        if (type >= 0x23 && type <= 0x2F) {
+        if (bbsc_rx_allowed && type >= 0x23 && type <= 0x2F) {
             // A BBSC build newer than this one: expected traffic, not a protocol error. Log the
             // first of each type (and its bytes) so a layout that does not match is visible in
             // one run.
