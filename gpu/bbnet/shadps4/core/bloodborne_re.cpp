@@ -2665,9 +2665,33 @@ void WriteUseItemState(std::ostream& out, const TraceSite& site,
     out << '}';
 }
 
+// The vanilla bells and blanks, and the kit's own ids (BbscKit, further down): dropping the kit's
+// ids here made the traces say nothing about exactly the bell that never posts a sign (report
+// 2026-10-27: the Kin Bell rings, effect 9005 goes on, no /summon_messenger/create).
 bool IsTrackedGoods(s32 goods_id) {
-    constexpr std::array TrackedGoods{100, 111, 200, 201, 205, 206, 225, 226};
+    constexpr std::array TrackedGoods{100, 111, 200, 201, 205, 206, 225,
+                                      226, 4016, 4121, 11201, 4313, 11251};
     return std::ranges::find(TrackedGoods, goods_id) != TrackedGoods.end();
+}
+
+// What a goods id is, for the bell logs. A kit item has its own id while its row (refId, SpEffect)
+// is the vanilla one, and Bloodborne's own bell logic compares the resolved id with 205 / 225.
+std::string_view BbscGoodsName(s32 goods_id) {
+    switch (goods_id) {
+    case 200: return "Beckoning Bell (vanilla)";
+    case 201: return "Beckoning Bell ringing form";
+    case 205: return "Small Resonant Bell (vanilla)";
+    case 206: return "Small Resonant Bell ringing form";
+    case 225: return "Sinister Resonant Bell (vanilla)";
+    case 226: return "Sinister Resonant Bell ringing form";
+    case 111: return "Silencing Blank (vanilla)";
+    case 4016: return "Hunt Bell (kit, row of 200)";
+    case 4121: return "Kin Bell (kit, row of 205)";
+    case 11201: return "Bloodlust Bell (kit, row of 225)";
+    case 4313: return "Duel Bell (kit)";
+    case 11251: return "Parting Blank (kit, row of 111)";
+    default: return "other goods";
+    }
 }
 
 s32 GetUseItemExecutionGoods(const TraceSite& site, const GuestRegisterSnapshot& registers) {
@@ -8576,42 +8600,18 @@ void PS4_SYSV_ABI BbscShopListHook(u64, const GuestRegisterSnapshot* registers) 
              bbsc_dream_own.held, shown.empty() ? std::string(" none") : shown);
 }
 
-// Kin Bell trace (report 2026-10-12: "can't use Kin in the Dream"). In the item check 0x0157F200
-// the Small Resonant / Sinister Bell branch (r12d 0xCD / 0xE1) calls 0x0191A750([0x0553E878]);
-// a 0 there takes the "not usable" side (0x0157F7B0). The hook sits right after that call
-// (0x0157F6D1: mov bl, al ; mov rdi, r14) and logs each change of goods id / result / map.
-constexpr u64 BellCheckTraceOffset = 0x0157F6D1;
-void PS4_SYSV_ABI BbscBellCheckHook(u64, const GuestRegisterSnapshot* registers) {
-    if (registers == nullptr || !HasMemoryAccess(registers->rbp - 0x1B8, 4, MemoryProt::CpuRead)) {
-        return;
-    }
-    static u64 last_key = ~0ull;
-    const u32 goods = ReadValue<u32>(registers->rbp - 0x1B8, 0);
-    const u8 ok = static_cast<u8>(registers->rax & 0xFF);
-    const u32 map = GetCurrentPackedMap();
-    const u64 key = (u64{goods} << 40) ^ (u64{ok} << 32) ^ map ^ (u64(registers->r12 & 0xFF) << 48);
-    if (key == last_key) {
-        return;
-    }
-    last_key = key;
-    const u64 global = GetGlobalState();
-    LOG_INFO(Debug, "BBSC bell check: goods {} (kind {:#x}) in map {:#x} - 0x0191A750 says {} "
-                    "(session state {}, own world {}) {}",
-             goods, static_cast<u32>(registers->r12), map, ok, GetSessionState(),
-             ReadablePointer(global, 0x1598) ? ReadValue<u8>(global, 0x1592) : 0xFF,
-             ok ? "usable side" : "NOT usable side");
-}
+// The bell item check (report 2026-10-12: "can't use Kin in the Dream"). In 0x0157F200 the Small
+// Resonant / Sinister Bell branch (r12d 0xCD / 0xE1) calls 0x0191A750([0x0553E878]); a 0 there
+// takes the "not usable" side (0x0157F7B0). A dedicated hook used to sit right after that call
+// (0x0157F6D1: mov bl, al ; mov rdi, r14), but the seamless responder patch writes those same
+// bytes first (88 C3 -> B1 01 at 0x6D1, a jump over the common result at 0x6D3), so it never
+// installed: "the code differs (another build?)" in the trace list, "BBSC bell check: failed to
+// hook 0x157f6d1" here. The same facts are logged from TraceEntry instead - the "BBSC bell:" line
+// carries the goods argument, the resolved goods id, the map and the item check's result.
 
 void InstallBbscQuitHook() {
     if (image_base == 0) {
         return;
-    }
-    {
-        static constexpr std::array<u8, 5> BellCheck{0x88, 0xC3, 0x4C, 0x89, 0xF7};
-        if (!InstallGuestCodeHook(reinterpret_cast<void*>(image_base + BellCheckTraceOffset),
-                                  std::span<const u8>{BellCheck}, 0, BbscBellCheckHook)) {
-            LOG_ERROR(Debug, "BBSC bell check: failed to hook {:#x}", BellCheckTraceOffset);
-        }
     }
     {
         static constexpr std::array<u8, 6> ShopPrologue{0x55, 0x48, 0x89, 0xE5, 0x41, 0x57};
@@ -12168,6 +12168,7 @@ constexpr u32 BbscHiddenVanilla[] = {200, 205, 225, 111};
 constexpr size_t GoodsRowSize = 108;
 
 void PrepareBbscKitRows(u64 table) {
+    static bool logged = false;
     for (const BbscKitItem& item : BbscKit) {
         const u64 row = BbscParamRow(table, item.id, GoodsRowSize);
         const u64 source = item.copy_of != 0 ? BbscParamRow(table, item.copy_of, GoodsRowSize) : 0;
@@ -12190,6 +12191,29 @@ void PrepareBbscKitRows(u64 table) {
         if (const u64 row = BbscParamRow(table, id); row != 0) {
             WriteValue<u8>(row, 68, 0);       // usable nowhere
             WriteValue<s32>(row, 28, 999000); // sorted last
+        }
+    }
+    // What the kit actually holds after the copy: the game keys its bell logic on the goods id it
+    // resolves, so the kit ids, their vanilla refId and the enable bytes are the first thing to
+    // look at when a bell rings but nothing is advertised (report 2026-10-27).
+    if (!logged) {
+        logged = true;
+        for (const BbscKitItem& item : BbscKit) {
+            const u64 row = BbscParamRow(table, item.id, GoodsRowSize);
+            if (row == 0) {
+                LOG_WARNING(Debug, "BBSC kit row: goods {} has no row in the goods table", item.id);
+                continue;
+            }
+            LOG_INFO(Debug,
+                     "BBSC kit row: goods {} refId {} (row of {}) enable byte {} "
+                     "consumeHeroPoint {}",
+                     item.id, ReadValue<s32>(row, 0), item.copy_of, ReadValue<u8>(row, 68),
+                     ReadValue<u8>(row, 56));
+        }
+        for (const u32 id : BbscHiddenVanilla) {
+            const u64 row = BbscParamRow(table, id);
+            LOG_INFO(Debug, "BBSC kit row: vanilla goods {} hidden, enable byte {}", id,
+                     row != 0 ? ReadValue<u8>(row, 68) : 0xFF);
         }
     }
 }
@@ -12760,6 +12784,21 @@ void TickBbscInvadable() {
         if (alive && BbscLocalEffectNode(id) != 0) {
             sign = id;
         }
+    }
+    // The sign effect going on and off, when it happens: the ring is accepted, and from here the
+    // game has to advertise it (its /summon_messenger/create). The lines below only say it every
+    // 30 s, which hid the moment a bell rang but posted nothing (report 2026-10-27).
+    static s32 last_sign = -1;
+    if (sign != last_sign) {
+        last_sign = sign;
+        LOG_INFO(Debug, "BBSC sign: own sign effect {} ({}) in map {:#x}, session state {} - {}",
+                 sign,
+                 sign == SmallResonantBellEffectId ? "Kin Bell, Small Resonant sign"
+                  : sign == 9025                      ? "Bloodlust Bell, Sinister sign"
+                                                      : "none, no sign out",
+                 GetCurrentPackedMap(), state,
+                 sign != 0 ? "the game has to advertise it (/summon_messenger/create)"
+                           : "nothing to advertise");
     }
     // Test 2026-10-05: no "world open" line at all - say every 30 s what keeps it shut.
     static s64 last_why_ms = 0;
@@ -13792,10 +13831,9 @@ void PS4_SYSV_ABI TraceEntry(u64 tag, const GuestRegisterSnapshot* registers) {
     s32 responder_goods = -1;
     if (site.kind == TraceKind::ResponderBellAvailability) {
         if (site.offset == 0x0157F686) {
+            // Every goods id, not only the vanilla 205 / 225: the kit's Kin Bell has its own id
+            // (4121) and this filter used to swallow exactly the case worth seeing (2026-10-27).
             responder_goods = static_cast<s32>(registers->r12);
-            if (responder_goods != 205 && responder_goods != 225) {
-                return;
-            }
             responder_availability_frame = registers->rbp;
             responder_availability_goods = responder_goods;
         } else {
@@ -13807,6 +13845,30 @@ void PS4_SYSV_ABI TraceEntry(u64 tag, const GuestRegisterSnapshot* registers) {
                 responder_availability_frame = 0;
                 responder_availability_goods = -1;
             }
+        }
+        const bool final_stage = site.offset == 0x015800D1;
+        LOG_INFO(Debug,
+                 "BBSC bell: {} - goods argument {} resolved {} ({}) in map {:#x}, session state "
+                 "{} -> {}",
+                 site.name, static_cast<s32>(registers->rbx), responder_goods,
+                 BbscGoodsName(responder_goods), GetCurrentPackedMap(), GetSessionState(),
+                 final_stage
+                     ? fmt::format("result {} ({})",
+                                   static_cast<u32>(static_cast<u8>(registers->rcx)),
+                                   static_cast<u8>(registers->rcx) ? "usable side"
+                                                                    : "NOT usable side")
+                     : std::string("the item check goes on"));
+    }
+    if (site.kind == TraceKind::UseItemExecution || site.kind == TraceKind::GoodsActionSubmit ||
+        site.kind == TraceKind::GoodsParamLookup) {
+        const s32 goods = site.kind == TraceKind::GoodsParamLookup
+                              ? static_cast<s32>(registers->rsi)
+                              : GetUseItemExecutionGoods(site, *registers);
+        static s32 last_goods = -1;
+        if (goods != last_goods) {
+            last_goods = goods;
+            LOG_INFO(Debug, "BBSC item use: {} goods {} ({}) in map {:#x}", site.name, goods,
+                     BbscGoodsName(goods), GetCurrentPackedMap());
         }
     }
 
