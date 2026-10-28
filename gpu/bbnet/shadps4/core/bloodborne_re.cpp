@@ -158,6 +158,12 @@ constexpr u64 ResponderBellKitItemOffset = 0x0157F686;
 constexpr std::array<u8, 7> ResponderBellKitItem{0x41, 0x81, 0xFC, 0xCD, 0x00, 0x00, 0x00};
 constexpr std::array<u8, 7> ResponderBellKitItemPatched{0x41, 0x81, 0xFC, 0x19, 0x10,
                                                         0x00, 0x00};
+// Where the responder trace reads the goods id: the first instruction of the bell block, right after
+// the dispatch above (`mov [rbp-0x1B8], ebx`), so it fires only when the item was accepted as a bell
+// - and it is not one of the bytes the kit patch rewrites (a hook there took the whole trace, and
+// with it the BBSC tick, the kit and the relay, down - 2026-10-27, bell.2). Not the `jz` before it
+// either: the hook installer refuses relative jumps.
+constexpr u64 ResponderBellAvailabilityEntryOffset = 0x0157F69A;
 constexpr u64 SinisterBellKitItemOffset = 0x0157F691;
 constexpr std::array<u8, 7> SinisterBellKitItem{0x41, 0x81, 0xFC, 0xE1, 0x00, 0x00, 0x00};
 constexpr std::array<u8, 7> SinisterBellKitItemPatched{0x41, 0x81, 0xFC, 0xC1, 0x2B,
@@ -574,10 +580,10 @@ constexpr auto Sites = std::to_array<TraceSite>({
      {0x89, 0x85, 0x10, 0xFE, 0xFF, 0xFF},
      6},
     {"ResponderBell.Availability.Entry",
-     0x0157F686,
+     ResponderBellAvailabilityEntryOffset,
      TraceKind::ResponderBellAvailability,
-     {0x41, 0x81, 0xFC, 0xCD, 0x00, 0x00, 0x00},
-     7},
+     {0x89, 0x9D, 0x48, 0xFE, 0xFF, 0xFF},
+     6},
     {"ResponderBell.Availability.FinalResult",
      0x015800D1,
      TraceKind::ResponderBellAvailability,
@@ -2796,7 +2802,7 @@ void WriteResponderBellAvailability(std::ostream& out, const TraceSite& site,
         out << ",\"final_result\":" << static_cast<u32>(static_cast<u8>(registers.rcx));
     }
     out << '}';
-    if (site.offset == 0x0157F686) {
+    if (site.offset == ResponderBellAvailabilityEntryOffset) {
         WriteMultiplayerEffects(out, registers.r14);
     }
 }
@@ -13848,7 +13854,7 @@ void PS4_SYSV_ABI TraceEntry(u64 tag, const GuestRegisterSnapshot* registers) {
     }
     s32 responder_goods = -1;
     if (site.kind == TraceKind::ResponderBellAvailability) {
-        if (site.offset == 0x0157F686) {
+        if (site.offset == ResponderBellAvailabilityEntryOffset) {
             // Every goods id, not only the vanilla 205 / 225: the kit's Kin Bell has its own id
             // (4121) and this filter used to swallow exactly the case worth seeing (2026-10-27).
             responder_goods = static_cast<s32>(registers->r12);
@@ -14381,9 +14387,15 @@ void PS4_SYSV_ABI TraceEntry(u64 tag, const GuestRegisterSnapshot* registers) {
     }
 }
 
+// Sites whose bytes are not what this build expects: one of our own seamless patches may sit there,
+// or the eboot differs. Such a hook is skipped; the rest of the trace still installs (2026-10-27:
+// aborting the whole trace for one hook also stopped the BBSC tick, the kit and the relay).
+std::array<bool, Sites.size()> site_bytes_mismatch{};
+
 bool VerifySites() {
     const auto image_size = MemoryPatcher::g_eboot_image_size;
-    for (const auto& site : Sites) {
+    for (size_t index = 0; index < Sites.size(); ++index) {
+        const auto& site = Sites[index];
         if ((summon_build_host_placement_hook_installed && site.offset == SummonBuildEntryOffset) ||
             (cross_map_guest_handoff_hook_installed && site.offset == CrossMapGuestHandoffOffset) ||
             (summon_reload_state_hook_installed &&
@@ -14401,10 +14413,11 @@ bool VerifySites() {
         const auto actual = std::span<const u8>{
             reinterpret_cast<const u8*>(image_base + site.offset), expected.size()};
         if (!std::ranges::equal(actual, expected)) {
-            LOG_ERROR(Debug,
-                      "Bloodborne RE signature mismatch at {} ({:#x}): expected={} actual={}",
-                      site.name, site.offset, BytesToHex(expected), BytesToHex(actual));
-            return false;
+            site_bytes_mismatch[index] = true;
+            LOG_WARNING(Debug,
+                        "Bloodborne RE signature mismatch at {} ({:#x}): expected={} actual={} - "
+                        "that one hook is skipped",
+                        site.name, site.offset, BytesToHex(expected), BytesToHex(actual));
         }
     }
     return true;
@@ -15438,6 +15451,9 @@ void InstallReverseEngineeringTrace() {
             ++hook_count;
             continue;
         }
+        if (site_bytes_mismatch[index]) {
+            continue; // its bytes differ (logged by VerifySites): only this hook is lost
+        }
         const auto expected = std::span<const u8>{site.prologue.data(), site.prologue_size};
         if (!InstallGuestCodeHook(reinterpret_cast<void*>(image_base + site.offset), expected,
                                   index, TraceEntry)) {
@@ -15448,7 +15464,7 @@ void InstallReverseEngineeringTrace() {
         ++hook_count;
     }
 
-    installed = hook_count == Sites.size();
+    installed = true; // whatever fit is installed; a skipped hook must not make a retry reinstall
     LOG_INFO(Debug, "Bloodborne RE trace installed {}/{} hooks; capture={}", hook_count,
              Sites.size(), Common::FS::PathToUTF8String(capture_path));
     InstallBbscSpectateHooks();
