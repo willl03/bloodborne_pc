@@ -144,6 +144,24 @@ constexpr std::array<u8, 8> ResponderBellCommonResult{0x4C, 0x89, 0xF7, 0xE8,
                                                       0xF5, 0x9F, 0x34, 0x00};
 constexpr std::array<u8, 8> ResponderBellAllowedCommonResult{0xE9, 0xE9, 0x09, 0x00,
                                                              0x00, 0x90, 0x90, 0x90};
+// Which goods count as a responder bell. The live image (2026-10-27) shows the dispatch:
+//   0x0157F686  cmp r12d, 0xCD      ; Small Resonant Bell (vanilla) -> bell block
+//   0x0157F68D  jz  ...
+//   0x0157F68F  mov al, 1           ; the invader-sign flag
+//   0x0157F691  cmp r12d, 0xE1      ; Sinister Resonant Bell (vanilla)
+//   0x0157F698  jnz ...             ; none of them: out of the bell block
+// The kit's bells carry ids of their own (BbscKit: 4121 Kin, 11201 Bloodlust) and their rows are
+// copies, so the effect plays (refId 9005 / 9025) while the item never enters the bell block: the
+// ring is accepted and no /summon_messenger/create is ever built (report 2026-10-27). Compare with
+// the kit ids instead; the vanilla rows are hidden and unusable, so they cannot be used to match.
+constexpr u64 ResponderBellKitItemOffset = 0x0157F686;
+constexpr std::array<u8, 7> ResponderBellKitItem{0x41, 0x81, 0xFC, 0xCD, 0x00, 0x00, 0x00};
+constexpr std::array<u8, 7> ResponderBellKitItemPatched{0x41, 0x81, 0xFC, 0x19, 0x10,
+                                                        0x00, 0x00};
+constexpr u64 SinisterBellKitItemOffset = 0x0157F691;
+constexpr std::array<u8, 7> SinisterBellKitItem{0x41, 0x81, 0xFC, 0xE1, 0x00, 0x00, 0x00};
+constexpr std::array<u8, 7> SinisterBellKitItemPatched{0x41, 0x81, 0xFC, 0xC1, 0x2B,
+                                                       0x00, 0x00};
 constexpr u64 ActiveBellAreaComparisonOffset = 0x015068BB;
 constexpr std::array<u8, 2> ActiveBellAreaComparison{0x77, 0x4A};
 constexpr std::array<u8, 2> ActiveBellSignedAreaComparison{0x7F, 0x4A};
@@ -14975,6 +14993,34 @@ void InstallSeamlessCoopPatches() {
         return;
     }
 
+    // SHADPS4_BBSC_NO_KIT_BELL_IDS=1 keeps the dispatch on the vanilla goods ids, i.e. the
+    // behaviour before this patch, without a rebuild.
+    static const bool kit_bell_ids = !EnvFlagEnabled("SHADPS4_BBSC_NO_KIT_BELL_IDS");
+    auto* responder_bell_kit_item = reinterpret_cast<u8*>(base + ResponderBellKitItemOffset);
+    auto* sinister_bell_kit_item = reinterpret_cast<u8*>(base + SinisterBellKitItemOffset);
+    if (kit_bell_ids) {
+        const auto actual_responder_bell_kit_item =
+            std::span<const u8>{responder_bell_kit_item, ResponderBellKitItem.size()};
+        if (!std::ranges::equal(actual_responder_bell_kit_item, ResponderBellKitItem)) {
+            LOG_ERROR(Debug,
+                      "Bloodborne responder Bell item-id signature mismatch at {:#x}: "
+                      "expected={} actual={}",
+                      ResponderBellKitItemOffset, BytesToHex(ResponderBellKitItem),
+                      BytesToHex(actual_responder_bell_kit_item));
+            return;
+        }
+        const auto actual_sinister_bell_kit_item =
+            std::span<const u8>{sinister_bell_kit_item, SinisterBellKitItem.size()};
+        if (!std::ranges::equal(actual_sinister_bell_kit_item, SinisterBellKitItem)) {
+            LOG_ERROR(Debug,
+                      "Bloodborne Sinister Bell item-id signature mismatch at {:#x}: "
+                      "expected={} actual={}",
+                      SinisterBellKitItemOffset, BytesToHex(SinisterBellKitItem),
+                      BytesToHex(actual_sinister_bell_kit_item));
+            return;
+        }
+    }
+
     auto* active_bell_area_comparison =
         reinterpret_cast<u8*>(base + ActiveBellAreaComparisonOffset);
     const auto actual_active_bell_area_comparison =
@@ -15230,6 +15276,20 @@ void InstallSeamlessCoopPatches() {
                 ResponderBellAllowedAreaResult.size());
     std::memcpy(responder_bell_common_result, ResponderBellAllowedCommonResult.data(),
                 ResponderBellAllowedCommonResult.size());
+    if (kit_bell_ids) {
+        std::memcpy(responder_bell_kit_item, ResponderBellKitItemPatched.data(),
+                    ResponderBellKitItemPatched.size());
+        std::memcpy(sinister_bell_kit_item, SinisterBellKitItemPatched.data(),
+                    SinisterBellKitItemPatched.size());
+        LOG_INFO(Debug,
+                 "BBSC kit bell ids: responder bells dispatched on the kit's goods ids "
+                 "(4121 Kin, 11201 Bloodlust) at {:#x}/{:#x}; "
+                 "SHADPS4_BBSC_NO_KIT_BELL_IDS=1 turns this off",
+                 ResponderBellKitItemOffset, SinisterBellKitItemOffset);
+    } else {
+        LOG_INFO(Debug, "BBSC kit bell ids: dispatch left on the vanilla ids (200/205/225/111) "
+                        "by SHADPS4_BBSC_NO_KIT_BELL_IDS");
+    }
     std::memcpy(active_bell_area_comparison, ActiveBellSignedAreaComparison.data(),
                 ActiveBellSignedAreaComparison.size());
     std::memcpy(active_bell_area_flag_result, ActiveBellAllowedAreaFlagResult.data(),
