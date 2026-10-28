@@ -12192,11 +12192,23 @@ void PrepareBbscKitRows(u64 table) {
         if (row == 0) {
             continue;
         }
-        WriteValue<u8>(row, 56, 0);             // consumeHeroPoint: no Insight
+        WriteValue<u8>(row, 56, 0); // consumeHeroPoint: no Insight
+        if (!item.own_row) {
+            // SHADPS4_BBSC_NO_KIT_ROWS=1 leaves the vanilla bell rows exactly as the game has them
+            // (only the Insight cost is dropped): the kit's cosmetics are not what makes a bell
+            // ring and advertise, and one of these writes may be in the way (report 2026-10-28).
+            static const bool repaint = !EnvFlagEnabled("SHADPS4_BBSC_NO_KIT_ROWS");
+            if (repaint) {
+                WriteValue<u16>(row, 44, item.icon);    // iconId
+                WriteValue<s32>(row, 28, item.sort_id); // sortId: with the kit
+                WriteValue<u8>(row, 58, 0); // goodsType: normal item (some slots were keys)
+            }
+            continue;
+        }
         WriteValue<u16>(row, 44, item.icon);    // iconId
         WriteValue<s32>(row, 28, item.sort_id); // sortId: with the kit
         WriteValue<u8>(row, 58, 0);             // goodsType: normal item (some slots were keys)
-        if (item.own_row) {
+        {
             // The Duel Bell borrows an unused key item: no "ringing" form of its own.
             WriteValue<s32>(row, 100, -1); // replaceItemId_bySpEffect
             WriteValue<s32>(row, 104, -1); // replaceTriggerSpEffectId
@@ -12215,7 +12227,9 @@ void PrepareBbscKitRows(u64 table) {
             LOG_INFO(Debug,
                      "BBSC kit row: goods {} refId {} ({}) enable byte {} consumeHeroPoint {}",
                      item.id, ReadValue<s32>(row, 0),
-                     item.own_row ? "kit slot" : "vanilla row, repainted",
+                     item.own_row ? "kit slot"
+                      : EnvFlagEnabled("SHADPS4_BBSC_NO_KIT_ROWS") ? "vanilla row, untouched"
+                                                                   : "vanilla row, repainted",
                      ReadValue<u8>(row, 68), ReadValue<u8>(row, 56));
         }
         for (const u32 id : BbscRetiredKitIds) {
@@ -13855,6 +13869,15 @@ void PS4_SYSV_ABI TraceEntry(u64 tag, const GuestRegisterSnapshot* registers) {
             }
         }
         const bool final_stage = site.offset == 0x015800D1;
+        // A bell's item check runs on every poll: say it once per goods id, stage and answer.
+        static u64 last_key = ~0ull;
+        const u64 answer = final_stage ? (static_cast<u8>(registers->rcx) ? 1ull : 2ull) : 0ull;
+        const u64 key = ((static_cast<u64>(responder_goods) & 0xFFFFull) << 48) |
+                        ((final_stage ? 1ull : 0ull) << 40) | answer;
+        if (key == last_key) {
+            return;
+        }
+        last_key = key;
         LOG_INFO(Debug,
                  "BBSC bell: {} - goods argument {} resolved {} ({}) in map {:#x}, session state "
                  "{} -> {}",
@@ -13867,11 +13890,10 @@ void PS4_SYSV_ABI TraceEntry(u64 tag, const GuestRegisterSnapshot* registers) {
                                                                     : "NOT usable side")
                      : std::string("the item check goes on"));
     }
-    if (site.kind == TraceKind::UseItemExecution || site.kind == TraceKind::GoodsActionSubmit ||
-        site.kind == TraceKind::GoodsParamLookup) {
-        const s32 goods = site.kind == TraceKind::GoodsParamLookup
-                              ? static_cast<s32>(registers->rsi)
-                              : GetUseItemExecutionGoods(site, *registers);
+    if (site.kind == TraceKind::UseItemExecution || site.kind == TraceKind::GoodsActionSubmit) {
+        // Only the actual use: GameParam.Goods.Lookup runs for every row the HUD and the item bar
+        // read, which turned into a line per frame once the bells were the vanilla items.
+        const s32 goods = GetUseItemExecutionGoods(site, *registers);
         static s32 last_goods = -1;
         if (goods != last_goods) {
             last_goods = goods;
