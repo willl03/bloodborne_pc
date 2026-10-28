@@ -203,10 +203,24 @@
 {10, 11251, u"Parting Blank"}, // (empty)
 {20, 11251, u"Use to end co-op.\nGuests go home; the host sends everyone home."}, // (empty)
 {24, 11251, u"A blank of silent powder.\n\nIts inaudible burst breaks the resonance\nbinding hunters of different worlds, and\neach returns to their own night."}, // (empty)
-{20, 200, u"No longer used. Use the Hunt Bell."}, // Use Insight to ring and call to other worlds for help.
-{20, 205, u"No longer used. Use the Kin Bell."}, // Ring this bell to help hunters in other worlds.
-{20, 225, u"No longer used. Use the Bloodlust Bell."}, // Ring to become the enemy of a hunter in another world.
-{20, 111, u"No longer used. Use the Parting Blank."}, // Fire to end ongoing, and prevent further, cooperation.
+{10, 200, u"Hunt Bell"}, // Beckoning Bell
+{10, 201, u"Hunt Bell"}, // Beckoning Bell, ringing form
+
+{20, 200, u"Ring to call other players into your game.\nCosts no Insight."}, // Use Insight to ring and call to other worlds for help.
+{24, 200, u"An old bell carried by the hunters of the\nworkshop, its toll heard across every world.\n\nRing it, and hunters who answer with a\nKin Bell may join your hunt. Together you\nwalk the night, through every lamp,\ndeath and dream, until the hunt is done."}, // Ring to beckon hunters from other worlds. Consumes 1 Insight.
+{10, 205, u"Kin Bell"}, // Small Resonant Bell
+{10, 206, u"Kin Bell"}, // Small Resonant Bell, ringing form
+
+{20, 205, u"Ring to join another players game.\nCosts no Insight."}, // Ring this bell to help hunters in other worlds.
+{24, 205, u"A small bell of the choir, its chime\nfaint, but true.\n\nHunters who hear a Hunt Bell may answer\nwith it, crossing into another world to\nstand at the side of kin. What is slain\nthere is slain for both."}, // Ring to answer a beckoner and join their world.
+{10, 225, u"Bloodlust Bell"}, // Sinister Resonant Bell
+{10, 226, u"Bloodlust Bell"}, // Sinister Resonant Bell, ringing form
+
+{20, 225, u"Ring to invade another players world.\nCosts no Insight."}, // Ring to become the enemy of a hunter in another world.
+{24, 225, u"A bell that sounds only for the blood-drunk.\n\nNo maiden need ring for its toll to be\nheard: every hunter of the night is prey,\nalone or in company, wherever they walk.\n\nThe hunt for hunters never ends."}, // Ring to invade another hunter's world as an adversary.
+{10, 111, u"Parting Blank"}, // Silencing Blank
+{20, 111, u"Use to end co-op.\nGuests go home; the host sends everyone home."}, // Fire to end ongoing, and prevent further, cooperation.
+{24, 111, u"A blank of silent powder.\n\nIts inaudible burst breaks the resonance\nbinding hunters of different worlds, and\neach returns to their own night."}, // Fire to end ongoing, and prevent further, cooperation.
 {10, 4313, u"Duel Bell"}, // (empty)
 {20, 4313, u"Ring in co-op to turn on PvP between players.\nRing again to turn it off."}, // (empty)
 {24, 4313, u"A cracked bell with a sour, discordant chime.\n\nRing it while hunting together, and the\nresonance binding the hunters turns to\nrivalry: they may strike one another as foes.\n\nRing it again to restore the old bond.\nOnly the beckoner decides; a cooperator\nwho rings it merely asks."}, // (empty)

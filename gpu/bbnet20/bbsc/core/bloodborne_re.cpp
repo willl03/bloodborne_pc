@@ -144,30 +144,18 @@ constexpr std::array<u8, 8> ResponderBellCommonResult{0x4C, 0x89, 0xF7, 0xE8,
                                                       0xF5, 0x9F, 0x34, 0x00};
 constexpr std::array<u8, 8> ResponderBellAllowedCommonResult{0xE9, 0xE9, 0x09, 0x00,
                                                              0x00, 0x90, 0x90, 0x90};
-// Which goods count as a responder bell. The live image (2026-10-27) shows the dispatch:
-//   0x0157F686  cmp r12d, 0xCD      ; Small Resonant Bell (vanilla) -> bell block
+// Bloodborne dispatches the responder bells on the goods id (live image, 2026-10-27):
+//   0x0157F686  cmp r12d, 0xCD      ; Small Resonant Bell (205) -> bell block
 //   0x0157F68D  jz  ...
 //   0x0157F68F  mov al, 1           ; the invader-sign flag
-//   0x0157F691  cmp r12d, 0xE1      ; Sinister Resonant Bell (vanilla)
+//   0x0157F691  cmp r12d, 0xE1      ; Sinister Resonant Bell (225)
 //   0x0157F698  jnz ...             ; none of them: out of the bell block
-// The kit's bells carry ids of their own (BbscKit: 4121 Kin, 11201 Bloodlust) and their rows are
-// copies, so the effect plays (refId 9005 / 9025) while the item never enters the bell block: the
-// ring is accepted and no /summon_messenger/create is ever built (report 2026-10-27). Compare with
-// the kit ids instead; the vanilla rows are hidden and unusable, so they cannot be used to match.
-constexpr u64 ResponderBellKitItemOffset = 0x0157F686;
-constexpr std::array<u8, 7> ResponderBellKitItem{0x41, 0x81, 0xFC, 0xCD, 0x00, 0x00, 0x00};
-constexpr std::array<u8, 7> ResponderBellKitItemPatched{0x41, 0x81, 0xFC, 0x19, 0x10,
-                                                        0x00, 0x00};
-// Where the responder trace reads the goods id: the first instruction of the bell block, right after
-// the dispatch above (`mov [rbp-0x1B8], ebx`), so it fires only when the item was accepted as a bell
-// - and it is not one of the bytes the kit patch rewrites (a hook there took the whole trace, and
-// with it the BBSC tick, the kit and the relay, down - 2026-10-27, bell.2). Not the `jz` before it
-// either: the hook installer refuses relative jumps.
+// The kit's bells are the vanilla items (ids 200 / 205 / 225 / 111), so this dispatch matches them
+// as it does in the vanilla game - a copy with an id of its own rang but never advertised.
+// The trace reads the goods id at the first instruction of the bell block (`mov [rbp-0x1B8], ebx`),
+// so it fires only when the item was accepted as a bell; the `jz` before it cannot be hooked (the
+// installer refuses relative jumps).
 constexpr u64 ResponderBellAvailabilityEntryOffset = 0x0157F69A;
-constexpr u64 SinisterBellKitItemOffset = 0x0157F691;
-constexpr std::array<u8, 7> SinisterBellKitItem{0x41, 0x81, 0xFC, 0xE1, 0x00, 0x00, 0x00};
-constexpr std::array<u8, 7> SinisterBellKitItemPatched{0x41, 0x81, 0xFC, 0xC1, 0x2B,
-                                                       0x00, 0x00};
 constexpr u64 ActiveBellAreaComparisonOffset = 0x015068BB;
 constexpr std::array<u8, 2> ActiveBellAreaComparison{0x77, 0x4A};
 constexpr std::array<u8, 2> ActiveBellSignedAreaComparison{0x7F, 0x4A};
@@ -2702,18 +2690,18 @@ bool IsTrackedGoods(s32 goods_id) {
 // is the vanilla one, and Bloodborne's own bell logic compares the resolved id with 205 / 225.
 std::string_view BbscGoodsName(s32 goods_id) {
     switch (goods_id) {
-    case 200: return "Beckoning Bell (vanilla)";
-    case 201: return "Beckoning Bell ringing form";
-    case 205: return "Small Resonant Bell (vanilla)";
-    case 206: return "Small Resonant Bell ringing form";
-    case 225: return "Sinister Resonant Bell (vanilla)";
-    case 226: return "Sinister Resonant Bell ringing form";
-    case 111: return "Silencing Blank (vanilla)";
-    case 4016: return "Hunt Bell (kit, row of 200)";
-    case 4121: return "Kin Bell (kit, row of 205)";
-    case 11201: return "Bloodlust Bell (kit, row of 225)";
-    case 4313: return "Duel Bell (kit)";
-    case 11251: return "Parting Blank (kit, row of 111)";
+    case 200: return "Hunt Bell (goods 200)";
+    case 201: return "Hunt Bell ringing form";
+    case 205: return "Kin Bell (goods 205)";
+    case 206: return "Kin Bell ringing form";
+    case 225: return "Bloodlust Bell (goods 225)";
+    case 226: return "Bloodlust Bell ringing form";
+    case 111: return "Parting Blank (goods 111)";
+    case 4016: return "old kit slot 4016";
+    case 4121: return "old kit slot 4121";
+    case 11201: return "old kit slot 11201";
+    case 4313: return "Duel Bell (kit slot)";
+    case 11251: return "old kit slot 11251";
     default: return "other goods";
     }
 }
@@ -12167,60 +12155,55 @@ std::map<u64, u32> bbsc_pvp_original_team; // character -> its team before PvP
 
 // ---- The BBSC hunter's kit (2026-10-05) ---------------------------------------------------------
 // The user: "our own stuff - summoning, joining, pvp, invading - with our rules, including no insight
-// cost", given to every character (new ones too) into the carried items, vanilla bells hidden.
-// Each kit item is an unused goods slot that has item name / info / caption text slots (msg 10, 20,
-// 24); its row becomes a copy of the vanilla item it replaces (same refId: the same SpEffect, so the
-// game's own sign / search / leave code runs), then: no Insight (consumeHeroPoint +56 = 0), its own
-// icon and sort position, and no "ringing" form (replaceItemId_bySpEffect +100 / +104 = -1: the
-// vanilla forms 201/206/226 turn back into the vanilla bells). The vanilla bells and the Silencing
-// Blank stay in inventories but cannot be used any more (+68 enable bits cleared) and sort last;
-// their texts point at the kit (gen_messages.py).
+// cost", given to every character (new ones too) into the carried items.
+//
+// The bells keep their vanilla goods ids (200 Beckoning = Hunt Bell, 205 Small Resonant = Kin Bell,
+// 225 Sinister = Bloodlust Bell, 111 Silencing Blank = Parting Blank). Bloodborne decides what a
+// bell is by that id, in more than one place (its item check dispatches on `cmp r12d, 0xCD` /
+// `0xE1`, and the code that starts a sign is id-keyed as well), so a copy in a slot of its own rang
+// - its SpEffect played - but never advertised: no /summon_messenger/create in any seamless session
+// of 2026-10-27, while the same save's vanilla ids created signs (report 2026-10-27). Only the row
+// is repainted: no Insight (consumeHeroPoint +56 = 0), the kit's icon and sort position, and the
+// vanilla names / info / captions (bbsc_messages.inc, msg 10 / 20 / 24). The Duel Bell (4313) is the
+// kit's own unused slot, see PrepareBbscDuelBell.
 struct BbscKitItem {
     u32 id;
-    u32 copy_of;  // the vanilla goods row it copies
+    bool own_row;  // false: a vanilla row repainted; true: the kit's own slot (Duel Bell)
     u16 icon;
     s32 sort_id;
     const char16_t* name;
 };
 constexpr BbscKitItem BbscKit[] = {
-    {4016, 200, 71, 240010, u"Hunt Bell"},       // Beckoning Bell (SpEffect 9000: search)
-    {4121, 205, 37, 240011, u"Kin Bell"},        // Small Resonant Bell (9005: cooperator sign)
-    {11201, 225, 70, 240012, u"Bloodlust Bell"}, // Sinister Resonant Bell (9025: invader sign)
-    {4313, 0, 7, 240013, u"Duel Bell"},          // own row, see PrepareBbscDuelBell
-    {11251, 111, 9, 240014, u"Parting Blank"},   // Silencing Blank (SpEffect 7: leave)
+    {200, false, 71, 240010, u"Hunt Bell"},       // Beckoning Bell (SpEffect 9000: search)
+    {205, false, 37, 240011, u"Kin Bell"},        // Small Resonant Bell (9005: cooperator sign)
+    {225, false, 70, 240012, u"Bloodlust Bell"},  // Sinister Resonant Bell (9025: invader sign)
+    {4313, true, 7, 240013, u"Duel Bell"},        // own row, see PrepareBbscDuelBell
+    {111, false, 9, 240014, u"Parting Blank"},    // Silencing Blank (SpEffect 7: leave)
 };
-constexpr u32 BbscHiddenVanilla[] = {200, 205, 225, 111};
+// What the kit used before 2026-10-27 (its own slots) plus the bells' "ringing" forms: taken out of
+// every carried and stored inventory once, so a save made with the old kit keeps working.
+constexpr u32 BbscRetiredKitIds[] = {201, 206, 226, 4016, 4121, 11201, 11251};
 constexpr size_t GoodsRowSize = 108;
 
 void PrepareBbscKitRows(u64 table) {
     static bool logged = false;
     for (const BbscKitItem& item : BbscKit) {
         const u64 row = BbscParamRow(table, item.id, GoodsRowSize);
-        const u64 source = item.copy_of != 0 ? BbscParamRow(table, item.copy_of, GoodsRowSize) : 0;
-        if (row == 0 || (item.copy_of != 0 && source == 0)) {
+        if (row == 0) {
             continue;
         }
-        if (source != 0 && ReadValue<u8>(source, 68) != 0) { // not hidden yet: still the original
-            std::array<u8, GoodsRowSize> copy{};
-            std::memcpy(copy.data(), reinterpret_cast<const void*>(source), copy.size());
-            std::memcpy(reinterpret_cast<void*>(row), copy.data(), copy.size());
-        }
-        WriteValue<u8>(row, 56, 0);              // consumeHeroPoint: no Insight
-        WriteValue<u16>(row, 44, item.icon);     // iconId
-        WriteValue<s32>(row, 28, item.sort_id);  // sortId
-        WriteValue<s32>(row, 100, -1);           // replaceItemId_bySpEffect
-        WriteValue<s32>(row, 104, -1);           // replaceTriggerSpEffectId
-        WriteValue<u8>(row, 58, 0);              // goodsType: normal item (some slots were keys)
-    }
-    for (const u32 id : BbscHiddenVanilla) {
-        if (const u64 row = BbscParamRow(table, id); row != 0) {
-            WriteValue<u8>(row, 68, 0);       // usable nowhere
-            WriteValue<s32>(row, 28, 999000); // sorted last
+        WriteValue<u8>(row, 56, 0);             // consumeHeroPoint: no Insight
+        WriteValue<u16>(row, 44, item.icon);    // iconId
+        WriteValue<s32>(row, 28, item.sort_id); // sortId: with the kit
+        WriteValue<u8>(row, 58, 0);             // goodsType: normal item (some slots were keys)
+        if (item.own_row) {
+            // The Duel Bell borrows an unused key item: no "ringing" form of its own.
+            WriteValue<s32>(row, 100, -1); // replaceItemId_bySpEffect
+            WriteValue<s32>(row, 104, -1); // replaceTriggerSpEffectId
         }
     }
-    // What the kit actually holds after the copy: the game keys its bell logic on the goods id it
-    // resolves, so the kit ids, their vanilla refId and the enable bytes are the first thing to
-    // look at when a bell rings but nothing is advertised (report 2026-10-27).
+    // The rows as the game sees them: the goods id is what every bell check compares, so it must
+    // stay the vanilla one (report 2026-10-27).
     if (!logged) {
         logged = true;
         for (const BbscKitItem& item : BbscKit) {
@@ -12230,15 +12213,16 @@ void PrepareBbscKitRows(u64 table) {
                 continue;
             }
             LOG_INFO(Debug,
-                     "BBSC kit row: goods {} refId {} (row of {}) enable byte {} "
-                     "consumeHeroPoint {}",
-                     item.id, ReadValue<s32>(row, 0), item.copy_of, ReadValue<u8>(row, 68),
-                     ReadValue<u8>(row, 56));
+                     "BBSC kit row: goods {} refId {} ({}) enable byte {} consumeHeroPoint {}",
+                     item.id, ReadValue<s32>(row, 0),
+                     item.own_row ? "kit slot" : "vanilla row, repainted",
+                     ReadValue<u8>(row, 68), ReadValue<u8>(row, 56));
         }
-        for (const u32 id : BbscHiddenVanilla) {
+        for (const u32 id : BbscRetiredKitIds) {
             const u64 row = BbscParamRow(table, id);
-            LOG_INFO(Debug, "BBSC kit row: vanilla goods {} hidden, enable byte {}", id,
-                     row != 0 ? ReadValue<u8>(row, 68) : 0xFF);
+            if (row != 0) {
+                LOG_INFO(Debug, "BBSC kit row: retired goods {} left as the game has it", id);
+            }
         }
     }
 }
@@ -12634,13 +12618,12 @@ void TickBbscDuelBellGive() {
         LOG_INFO(Debug, "BBSC kit: the Dream messenger's vanilla Beckoning Bell marked as given "
                         "(flag 6622) - the kit's Hunt Bell replaces it");
     }
-    static constexpr u32 Retired[] = {200, 201, 205, 206, 225, 226, 111};
     bool retire = false;
-    for (const u32 id : Retired) {
+    for (const u32 id : BbscRetiredKitIds) {
         retire = retire || has(id);
     }
     if (missing.empty() && !retire) {
-        LOG_INFO(Debug, "BBSC kit: all carried or in storage, no vanilla bells left");
+        LOG_INFO(Debug, "BBSC kit: all carried or in storage, nothing to migrate");
         checked_player = player; // [extra]
         return;
     }
@@ -12648,11 +12631,11 @@ void TickBbscDuelBellGive() {
         LOG_WARNING(Debug, "BBSC kit: save backup failed - nothing given or removed"); // [extra]
         return;
     }
-    for (const u32 id : Retired) {
+    for (const u32 id : BbscRetiredKitIds) {
         for (const u64 inventory : {carried, storage}) {
             if (inventory != 0 && BbscInventoryHas(inventory, 0x40000000u | id)) { // [extra]
                 const bool gone = BbscInventoryRemove(inventory, 0x40000000u | id);
-                LOG_INFO(Debug, "BBSC kit: vanilla goods {} taken out of the {} ({})", id,
+                LOG_INFO(Debug, "BBSC kit: old kit goods {} taken out of the {} ({})", id,
                          inventory == carried ? "carried items" : "storage box",
                          gone ? "gone" : "STILL THERE");
             }
@@ -15006,34 +14989,6 @@ void InstallSeamlessCoopPatches() {
         return;
     }
 
-    // SHADPS4_BBSC_NO_KIT_BELL_IDS=1 keeps the dispatch on the vanilla goods ids, i.e. the
-    // behaviour before this patch, without a rebuild.
-    static const bool kit_bell_ids = !EnvFlagEnabled("SHADPS4_BBSC_NO_KIT_BELL_IDS");
-    auto* responder_bell_kit_item = reinterpret_cast<u8*>(base + ResponderBellKitItemOffset);
-    auto* sinister_bell_kit_item = reinterpret_cast<u8*>(base + SinisterBellKitItemOffset);
-    if (kit_bell_ids) {
-        const auto actual_responder_bell_kit_item =
-            std::span<const u8>{responder_bell_kit_item, ResponderBellKitItem.size()};
-        if (!std::ranges::equal(actual_responder_bell_kit_item, ResponderBellKitItem)) {
-            LOG_ERROR(Debug,
-                      "Bloodborne responder Bell item-id signature mismatch at {:#x}: "
-                      "expected={} actual={}",
-                      ResponderBellKitItemOffset, BytesToHex(ResponderBellKitItem),
-                      BytesToHex(actual_responder_bell_kit_item));
-            return;
-        }
-        const auto actual_sinister_bell_kit_item =
-            std::span<const u8>{sinister_bell_kit_item, SinisterBellKitItem.size()};
-        if (!std::ranges::equal(actual_sinister_bell_kit_item, SinisterBellKitItem)) {
-            LOG_ERROR(Debug,
-                      "Bloodborne Sinister Bell item-id signature mismatch at {:#x}: "
-                      "expected={} actual={}",
-                      SinisterBellKitItemOffset, BytesToHex(SinisterBellKitItem),
-                      BytesToHex(actual_sinister_bell_kit_item));
-            return;
-        }
-    }
-
     auto* active_bell_area_comparison =
         reinterpret_cast<u8*>(base + ActiveBellAreaComparisonOffset);
     const auto actual_active_bell_area_comparison =
@@ -15289,20 +15244,6 @@ void InstallSeamlessCoopPatches() {
                 ResponderBellAllowedAreaResult.size());
     std::memcpy(responder_bell_common_result, ResponderBellAllowedCommonResult.data(),
                 ResponderBellAllowedCommonResult.size());
-    if (kit_bell_ids) {
-        std::memcpy(responder_bell_kit_item, ResponderBellKitItemPatched.data(),
-                    ResponderBellKitItemPatched.size());
-        std::memcpy(sinister_bell_kit_item, SinisterBellKitItemPatched.data(),
-                    SinisterBellKitItemPatched.size());
-        LOG_INFO(Debug,
-                 "BBSC kit bell ids: responder bells dispatched on the kit's goods ids "
-                 "(4121 Kin, 11201 Bloodlust) at {:#x}/{:#x}; "
-                 "SHADPS4_BBSC_NO_KIT_BELL_IDS=1 turns this off",
-                 ResponderBellKitItemOffset, SinisterBellKitItemOffset);
-    } else {
-        LOG_INFO(Debug, "BBSC kit bell ids: dispatch left on the vanilla ids (200/205/225/111) "
-                        "by SHADPS4_BBSC_NO_KIT_BELL_IDS");
-    }
     std::memcpy(active_bell_area_comparison, ActiveBellSignedAreaComparison.data(),
                 ActiveBellSignedAreaComparison.size());
     std::memcpy(active_bell_area_flag_result, ActiveBellAllowedAreaFlagResult.data(),
